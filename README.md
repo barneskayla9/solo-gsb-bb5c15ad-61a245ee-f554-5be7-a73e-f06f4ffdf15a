@@ -134,6 +134,16 @@ npm start
 
 导入通过页面右上角 **「⬆ 导入 JSON」** 完成（导入总是创建一份新剧情，不会覆盖现有内容）；导出使用 **「⬇ 导出 JSON」** 或接口 `GET /api/stories/:id/export`。
 
+## 变量清单与赋值编辑联动
+
+编辑器顶部的 **布尔变量清单** 与场景编辑区的两类赋值（**进入时状态赋值** 与每个选项的 **选择时赋值**）保持即时联动，变量增删都不需要重开下拉框或切换场景：
+
+- **新增变量立即出现在所有赋值下拉框**：添加变量后，当前场景中已经建立的场景进入赋值行、选项赋值行（以及右侧目标路径查询的到达约束行）的下拉框会**就地刷新选项**，新变量立刻可选；各行已选择的变量、`true/false` 布尔值、焦点与其他未保存编辑（选项文案、条件、跳转目标、权重等）都不会丢失或被重置；即使下拉框正处于打开状态，新变量也会立即出现在列表中。
+- **删除变量时清除指向它的赋值**：点击变量旁的 ✕ 后，编辑器会立即从**全剧情**（每个场景的进入赋值与每个选项的赋值）中删除写向该变量的赋值行；目标路径查询中以该变量为到达约束的行一并移除。**条件文本（选项条件 / 场景前置条件）原样保留**——与确认提示一致，之后的一致性分析会按现有规则提示“引用未声明变量”，不会静默改动任何表达式。
+- **界面、保存内容与未保存草稿审计使用同一份状态**：变量增删直接改在编辑中的草稿对象上，因此界面上剩余的赋值、`PUT /api/stories/:id` 保存的内容、以及对草稿实时运行的 `POST /api/assign-audit` 赋值消费审计结论始终一致；删除变量后不会留下界面空白但草稿仍保留该赋值的情况，连续多次增删变量、切换到其他场景再切回后同样一致。
+
+> 注意：该联动清除发生在编辑器（草稿）侧。直接调用保存接口时，服务端仍遵循既有规整约定——只过滤变量名为空的赋值，不会仅因变量未在 `variables` 中声明就删除赋值（未声明变量的赋值仍会作为已知状态参与分析，这也是导入旧 JSON 时的现有行为）。因此通过 API 保存“已删除某变量”的草稿时，请求体中应不再包含指向该变量的赋值；页面编辑器删除变量时会自动完成这一步。
+
 ## 分析原理（为什么含循环也能终止）
 
 分析器把每个可达局面编码为 `(场景 ID, 全部布尔变量的取值位图)`：
@@ -310,6 +320,62 @@ npm start
 **API 校验（返回 400）**：剧情缺少有效起点。起点前置条件不成立时以 `status: 'start-blocked'` 单独提示，不产出逐项结果。
 
 响应要点：`ok` / `status`（`ok` / `truncated` / `start-blocked`）、`truncated`、`assignments[]`（每处赋值：`kind`：`scene` 或 `option`、`sceneId` / `sceneTitle`、选项类另带 `optionIndex` / `optionUid` / `optionText`、`assignIndex`、`variable` / `value`、`label` 位置说明、`reachable`、`status`：`consumed` / `unconsumed` / `unknown` / `unreachable`、`reason`（未执行原因）、`reference`（已消费时：`variable` / `depth` 选项步数 / `reader`：引用者（`kind`：`option-condition` 或 `scene-precondition`，含场景、选项序号与条件原文）/ `readVariables`：该次条件求值中按真实短路顺序实际读取的变量（去重、保留首次读取次序）/ `skippedVariables`：条件中出现但被 `&&` / `||` 短路跳过、当次未读取的变量 / `path` 场景与选项交替并带每步状态 / `stateAtRead` 引用时的完整变量值））、`summary`（`total` / `reachable` / `consumed` / `unconsumed` / `unknown` / `unreachable`）、`counts`、`knownVars`、`conditionErrors`、`statesExplored`、`maxStates`、`message`。
+
+### 保存剧情与赋值消费审计的调用示例
+
+剧情保存接口（`PUT /api/stories/:id`，整体覆盖）与草稿审计接口（`POST /api/assign-audit`，不保存、只审计请求体）的请求 / 响应约定均保持不变。下面的示例演示一轮「新增 / 删除变量后，保存内容与草稿审计一致」的操作：
+
+```bash
+# 1) 保存剧情：请求体即完整剧情；响应为服务端规整后的完整记录（含 id / 时间戳 / 补齐的选项 uid）
+curl -s -X PUT http://localhost:3000/api/stories/demo \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "title": "示例",
+    "startScene": "a",
+    "variables": [{"name": "hasKey"}, {"name": "gone"}],
+    "scenes": [
+      { "id": "a", "assigns": [{"variable": "gone", "value": true}],
+        "options": [{"text": "进门", "condition": "gone", "target": "b",
+                     "assigns": [{"variable": "gone", "value": false},
+                                 {"variable": "hasKey", "value": true}]}] },
+      { "id": "b", "precondition": "gone", "options": [] }
+    ]
+  }'
+
+# 2) 对编辑中的草稿直接审计（不落盘）：请求体即剧情，或 { "story": <剧情> }（可带 maxStates）
+curl -s -X POST http://localhost:3000/api/assign-audit \
+  -H 'Content-Type: application/json' \
+  -d '{"story": { "startScene": "a", "variables": [{"name": "x"}],
+        "scenes": [
+          {"id": "a", "assigns": [{"variable": "x", "value": true}],
+           "options": [{"uid": "o1", "target": "b"}]},
+          {"id": "b", "options": [{"uid": "o2", "condition": "x", "target": "c"}]},
+          {"id": "c", "options": []}
+        ] }}'
+# -> 200，summary.consumed = 1；x 的进入赋值被场景 b 的选项条件首次读取（reference 含最短路线）
+
+# 3) 删除变量 gone 后再次保存：编辑器已先清除指向 gone 的赋值，请求体里不再出现该变量的赋值；
+#    条件文本（选项条件 "gone"、场景 b 的前置条件 "gone"）按约定原样保留
+curl -s -X PUT http://localhost:3000/api/stories/demo \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "title": "示例",
+    "startScene": "a",
+    "variables": [{"name": "hasKey"}],
+    "scenes": [
+      { "id": "a", "assigns": [],
+        "options": [{"text": "进门", "condition": "gone", "target": "b",
+                     "assigns": [{"variable": "hasKey", "value": true}]}] },
+      { "id": "b", "precondition": "gone", "options": [] }
+    ]
+  }'
+
+# 4) 已保存剧情的审计（GET，无请求体）；与删除后、保存前的草稿审计结论一致
+curl -s http://localhost:3000/api/stories/demo/assign-audit
+# -> assignments 中只剩 hasKey 的赋值位置，不再有 variable = "gone" 的项
+```
+
+错误约定：剧情缺少有效起点时 `POST /api/assign-audit` 返回 `400 {"error": "..."}`；起点前置条件不成立时返回 `200` 且 `status: "start-blocked"`（业务结果，不是错误）；`:id` 不存在时 `GET /api/stories/:id/assign-audit` 返回 `404`。页面编辑器内部正是按上述顺序使用这两个接口：变量增删先作用于草稿对象（界面即时一致），随后可随时对草稿审计，点击「保存剧情」才整体覆盖落盘。
 
 ## HTTP API
 

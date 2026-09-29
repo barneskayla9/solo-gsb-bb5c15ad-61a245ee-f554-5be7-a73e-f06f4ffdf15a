@@ -291,11 +291,7 @@ function renderVars() {
       const d = prompt(`变量 "${v.name}" 的说明：`, v.description || '');
       if (d !== null) { v.description = d; markDirty(renderVars); }
     });
-    chip.querySelector('button').addEventListener('click', () => {
-      if (!confirm(`删除变量 "${v.name}"？相关条件文本会保留（分析时会提示未声明变量）。`)) return;
-      state.story.variables = state.story.variables.filter((x) => x.name !== v.name);
-      markDirty(renderVars);
-    });
+    chip.querySelector('button').addEventListener('click', () => removeVariable(v.name));
     box.appendChild(chip);
   }
 }
@@ -308,7 +304,74 @@ function addVar() {
   if (state.story.variables.some((v) => v.name === name)) return toast('变量已存在');
   state.story.variables.push({ name, description: '' });
   input.value = '';
+  // 只就地刷新变量下拉框选项：当前场景里已建立的赋值行、已选变量、布尔值与
+  // 其他未保存编辑一律保留（包括正打开的下拉框，新变量立即可选）
+  syncVarSelects();
   markDirty(renderVars);
+}
+
+/* ============================================================
+ * 变量清单 ⇄ 赋值编辑联动
+ * ============================================================ */
+
+/** 就地同步所有“变量选择”下拉框（场景进入赋值 / 选项赋值 / 路径查询约束）的选项：
+ * 只增删 <option>，不重建行，因此已选变量、布尔值、焦点与其他未保存编辑都不丢失。 */
+function syncVarSelects() {
+  if (!state.story) return;
+  const validNames = state.story.variables.map((v) => v.name);
+  const valid = new Set(validNames);
+  document.querySelectorAll('select.js-var-select').forEach((sel) => {
+    const current = sel.value;
+    const placeholder = sel.querySelector('option[value=""]');
+    // 模型层已先行清掉指向被删变量的赋值；下拉框若仍指向失效变量则回到占位项
+    if (current && !valid.has(current)) sel.value = '';
+    for (const opt of [...sel.querySelectorAll('option')]) {
+      if (opt.value && !valid.has(opt.value)) opt.remove();
+    }
+    const existing = new Set([...sel.querySelectorAll('option')].map((o) => o.value));
+    for (const n of validNames) {
+      if (!existing.has(n)) {
+        const opt = document.createElement('option');
+        opt.value = n;
+        opt.textContent = n;
+        sel.appendChild(opt);
+      }
+    }
+    if (current && valid.has(current)) sel.value = current;
+    else if (placeholder) sel.value = '';
+  });
+}
+
+/** 删除变量：清除全剧情（所有场景的进入赋值与各选项赋值）中指向它的赋值，
+ * 以及路径查询约束中的同变量行；条件文本按现有提示原样保留。 */
+function removeVariable(name) {
+  if (!confirm(`删除变量 "${name}"？相关的场景 / 选项赋值会一并删除；条件文本会保留（分析时会提示未声明变量）。`)) return;
+  state.story.variables = state.story.variables.filter((x) => x.name !== name);
+  for (const sc of state.story.scenes) {
+    if (Array.isArray(sc.assigns)) sc.assigns = sc.assigns.filter((a) => a.variable !== name);
+    for (const opt of sc.options || []) {
+      if (Array.isArray(opt.assigns)) opt.assigns = opt.assigns.filter((a) => a.variable !== name);
+    }
+  }
+  // 路径查询的到达约束同样指向变量，删除变量后剔除对应行（查询面板会自行重建）
+  state.pathQuery.constraints = state.pathQuery.constraints.filter((c) => c.variable !== name);
+  // 只重绘当前场景的赋值行：保留选项文案 / 条件 / 目标 / 权重等未保存编辑与输入焦点
+  markDirty(() => {
+    renderVars();
+    refreshAssignRows();
+  });
+}
+
+/** 就地重绘当前场景的两类赋值行（变量清单变化后调用，不动选项卡片的其他输入） */
+function refreshAssignRows() {
+  const sc = currentScene();
+  if (!sc) return;
+  renderAssigns('sceneAssigns', sc.assigns, 'btnAddSceneAssign');
+  sc.options.forEach((opt, i) => {
+    const card = $('optionList').children[i];
+    if (card) renderOptionAssigns(card.querySelector('.opt-assigns'), opt);
+  });
+  syncVarSelects();
 }
 
 /* ============================================================
@@ -386,6 +449,7 @@ function renderAssigns(containerId, assigns, _btnId) {
     const row = document.createElement('div');
     row.className = 'assign-row';
     const sel = document.createElement('select');
+    sel.className = 'js-var-select';
     sel.innerHTML = '<option value="">（选择变量）</option>' +
       varNames.map((n) => `<option value="${n}">${n}</option>`).join('');
     sel.value = a.variable;
@@ -494,6 +558,7 @@ function renderOptionAssigns(container, opt) {
     const row = document.createElement('div');
     row.className = 'assign-row';
     const sel = document.createElement('select');
+    sel.className = 'js-var-select';
     sel.innerHTML = '<option value="">（变量）</option>' +
       varNames.map((n) => `<option value="${n}">${n}</option>`).join('');
     sel.value = a.variable;
@@ -775,6 +840,7 @@ function renderPqConstraints() {
     row.className = 'assign-row';
 
     const sel = document.createElement('select');
+    sel.className = 'js-var-select';
     sel.innerHTML = '<option value="">（选择变量）</option>' +
       varNames.map((n) => `<option value="${n}">${n}</option>`).join('');
     sel.value = c.variable;
