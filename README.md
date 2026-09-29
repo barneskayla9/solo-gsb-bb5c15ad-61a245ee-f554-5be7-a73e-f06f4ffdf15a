@@ -134,6 +134,45 @@ npm start
 
 导入通过页面右上角 **「⬆ 导入 JSON」** 完成（导入总是创建一份新剧情，不会覆盖现有内容）；导出使用 **「⬇ 导出 JSON」** 或接口 `GET /api/stories/:id/export`。
 
+## 变量清单与赋值编辑的联动
+
+编辑器顶部的 **布尔变量** 清单与场景的两类赋值（**场景进入赋值**、**选项选择时赋值**）下拉框保持实时联动，连续增删变量、切换场景后状态一致：
+
+- **新增变量**：在「新变量名」输入框回车（或点击添加）后，新变量名**立即**出现在当前场景所有已打开 / 未打开的赋值下拉框中，可直接选择；已经选定的变量、true/false 布尔值以及其他未保存编辑（文案、条件、目标、权重等）均不丢失。
+- **删除变量**：确认删除后，草稿中**所有指向该变量的赋值会一并删除**——不限于当前场景，每个场景的进入赋值与每个选项的选择时赋值都会被清理（之后保存即不会再写入这些赋值；对未保存草稿重新运行「变量赋值消费审计」也不会再列出它们）。
+- **条件文本保留**：选项显示条件与场景前置条件是自由文本，删除变量**不会**改动它们；条件中若仍引用该变量，分析会按既有规则提示「引用了未声明且从未赋值的变量」，由作者决定是否修改条件。
+- 右侧「目标路径查询」面板中指向已删变量的到达约束行会同步剔除（未选择变量的空行保留）。
+- 联动规则由前后端共用的 `public/varops.js` 实现（浏览器随页面加载，Node 测试直接 `require`），自检见 `node test/varops.js`。
+
+通过 HTTP 接口完成同一轮操作时，请求 / 响应约定保持不变：先保存删除变量并清理赋值后的草稿（整体覆盖），再对同一份草稿（不落盘）做赋值消费审计。
+
+```bash
+# 1) 保存：请求体即完整剧情（与既有 PUT 约定一致；assigns 中不再含被删变量）
+curl -X PUT http://localhost:3000/api/stories/<id> \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "title": "剧情标题",
+        "startScene": "village",
+        "variables": [{ "name": "hasKey", "description": "" }],
+        "scenes": [{
+          "id": "village", "precondition": "",
+          "assigns": [],
+          "options": [{
+            "text": "开门", "condition": "hasKey", "target": "hut",
+            "assigns": [{ "variable": "hasKey", "value": false }]
+          }]
+        }, { "id": "hut", "precondition": "", "assigns": [], "options": [] }]
+      }'
+# → 200，响应为规整后的完整剧情（自动补齐选项 uid、updatedAt 等）
+
+# 2) 对未保存草稿做变量赋值消费审计（请求体即剧情或 { "story": <剧情> }）
+curl -X POST http://localhost:3000/api/assign-audit \
+  -H 'Content-Type: application/json' \
+  -d '{ "story": { "startScene": "village", "variables": ["hasKey"], "scenes": [] } }'
+# → 200 { "status": "ok", "assignments": [...], "summary": {...}, ... }
+# 已保存剧情可用 GET /api/stories/<id>/assign-audit；缺少有效起点返回 400
+```
+
 ## 分析原理（为什么含循环也能终止）
 
 分析器把每个可达局面编码为 `(场景 ID, 全部布尔变量的取值位图)`：
@@ -404,6 +443,7 @@ npm start
 ├── public/                # 原生 HTML / CSS / JavaScript 前端（无构建步骤）
 │   ├── index.html
 │   ├── styles.css
+│   ├── varops.js          # 变量清单与赋值编辑联动规则（浏览器 / Node 测试共用 UMD）
 │   └── app.js
 ├── samples/               # 随启动初始化的示例剧情
 ├── scripts/
@@ -420,6 +460,7 @@ npm start
 │   ├── pacing.js          # 节奏校验（超限 / 通过 / 清零 / 环上累计 / 截断）与 API 自检（node test/pacing.js）
 │   ├── strategy.js        # 结局保证到达（可保证 / 死局 / 循环 / 不可达 / 截断 / 参数校验）与 API 自检（node test/strategy.js）
 │   ├── assignaudit.js     # 变量赋值消费审计（消费 / 未消费 / 未执行 / 截断未知 / 最短引用路线）与 API 自检（node test/assignaudit.js）
+│   ├── varops.js          # 变量清单与两类赋值联动（删变量清赋值 / 增变量即时可选 / 条件文本保留）与 HTTP 一致性自检（node test/varops.js）
 │   └── healthcheck.js     # 健康检查探针回归测试（node test/healthcheck.js）
 ├── Dockerfile
 └── docker-compose.yml

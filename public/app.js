@@ -292,9 +292,8 @@ function renderVars() {
       if (d !== null) { v.description = d; markDirty(renderVars); }
     });
     chip.querySelector('button').addEventListener('click', () => {
-      if (!confirm(`删除变量 "${v.name}"？相关条件文本会保留（分析时会提示未声明变量）。`)) return;
-      state.story.variables = state.story.variables.filter((x) => x.name !== v.name);
-      markDirty(renderVars);
+      if (!confirm(`删除变量 "${v.name}"？所有场景进入赋值与选项赋值中指向它的赋值会一并删除；相关条件文本会保留（分析时会提示未声明变量）。`)) return;
+      removeVariable(v.name);
     });
     box.appendChild(chip);
   }
@@ -308,7 +307,57 @@ function addVar() {
   if (state.story.variables.some((v) => v.name === name)) return toast('变量已存在');
   state.story.variables.push({ name, description: '' });
   input.value = '';
+  // 变量清单新增后就地刷新当前场景两类赋值下拉框的选项：
+  // 已打开的下拉框也立即能选到新变量，且已选变量 / 布尔值与其他未保存编辑不受影响。
+  syncAssignmentVarSelects();
   markDirty(renderVars);
+}
+
+/* ============================================================
+ * 变量清单 ↔ 赋值编辑联动
+ * ============================================================ */
+
+/**
+ * 删除变量：清除草稿中所有指向它的赋值（跨全部场景的进入赋值与
+ * 选项赋值）与路径查询约束；条件文本保留。随后就地重建当前场景的
+ * 两类赋值行，避免控件中残留已删变量（重绘后显示空白）。
+ * 界面、保存内容与未保存草稿审计自此使用同一份状态。
+ */
+function removeVariable(name) {
+  window.VarOps.removeVariableFromStory(state.story, name);
+  state.pathQuery.constraints = window.VarOps.pruneConstraints(state.pathQuery.constraints, name);
+  state._pqSig = null; // 变量集合已变，强制查询面板按新清单重建并再次清理
+  refreshAssignmentLists();
+  markDirty(renderVars);
+}
+
+/** 就地刷新编辑器中所有「变量选择」下拉框的候选项（保留当前选择） */
+function syncAssignmentVarSelects() {
+  if (!state.story) return;
+  const varNames = state.story.variables.map((v) => v.name);
+  document.querySelectorAll('#editor .var-select').forEach((sel) => {
+    const prev = sel.value;
+    const emptyLabel = sel.dataset.emptyLabel || '（选择变量）';
+    sel.innerHTML = `<option value="">${emptyLabel}</option>` +
+      varNames.map((n) => `<option value="${n}">${n}</option>`).join('');
+    // 候选项缺失（如指向已删变量）时浏览器会落回空值；正常增删变量时既有选择保持不变
+    sel.value = varNames.includes(prev) ? prev : '';
+  });
+}
+
+/**
+ * 重建当前场景的两类赋值列表（场景进入赋值 + 各选项赋值）。
+ * 只重绘赋值行，选项文案 / 条件 / 目标 / 权重等其他未保存编辑的
+ * 控件不被重建；行内布尔值下拉沿用模型中的 value，不会丢失。
+ */
+function refreshAssignmentLists() {
+  const sc = currentScene();
+  if (!sc) return;
+  renderAssigns('sceneAssigns', sc.assigns, 'btnAddSceneAssign');
+  sc.options.forEach((opt, i) => {
+    const card = document.querySelector(`#optionList .option-card[data-opt-index="${i}"]`);
+    if (card) renderOptionAssigns(card.querySelector('.opt-assigns'), opt);
+  });
 }
 
 /* ============================================================
@@ -386,6 +435,8 @@ function renderAssigns(containerId, assigns, _btnId) {
     const row = document.createElement('div');
     row.className = 'assign-row';
     const sel = document.createElement('select');
+    sel.className = 'var-select';
+    sel.dataset.emptyLabel = '（选择变量）';
     sel.innerHTML = '<option value="">（选择变量）</option>' +
       varNames.map((n) => `<option value="${n}">${n}</option>`).join('');
     sel.value = a.variable;
@@ -416,6 +467,7 @@ function renderOptions(sc) {
   sc.options.forEach((opt, i) => {
     const card = document.createElement('div');
     card.className = 'option-card';
+    card.dataset.optIndex = i;
 
     // 分析状态着色
     const optStatus = state.analysis ? state.analysis.optionStatus[`${sc.id}#${i}`] : null;
@@ -494,6 +546,8 @@ function renderOptionAssigns(container, opt) {
     const row = document.createElement('div');
     row.className = 'assign-row';
     const sel = document.createElement('select');
+    sel.className = 'var-select';
+    sel.dataset.emptyLabel = '（变量）';
     sel.innerHTML = '<option value="">（变量）</option>' +
       varNames.map((n) => `<option value="${n}">${n}</option>`).join('');
     sel.value = a.variable;
@@ -757,6 +811,10 @@ function renderPathQueryPanel() {
     const prune = (arr) => arr.filter((uid) => !uid || validUids.has(uid));
     state.pathQuery.requiredOptions = prune(state.pathQuery.requiredOptions);
     state.pathQuery.disabledOptions = prune(state.pathQuery.disabledOptions);
+    // 变量被删除时，到达约束中指向它的行同步剔除（空变量名占位行保留）
+    const validVars = new Set(state.story.variables.map((v) => v.name));
+    state.pathQuery.constraints = state.pathQuery.constraints
+      .filter((c) => !c.variable || validVars.has(c.variable));
     renderPqConstraints();
     renderPqRequired();
     renderPqDisabled();
